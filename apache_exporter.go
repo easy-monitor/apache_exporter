@@ -27,7 +27,7 @@ const (
 var (
 	listeningAddress = kingpin.Flag("telemetry.address", "Address on which to expose metrics.").Default(":9117").String()
 	metricsEndpoint  = kingpin.Flag("telemetry.endpoint", "Path under which to expose metrics.").Default("/metrics").String()
-	scrapeURI        = kingpin.Flag("scrape_uri", "URI to apache stub status page.").Default("http://localhost/server-status/?auto").String()
+	scrapeURI        = kingpin.Flag("scrape_uri", "URI to apache stub status page.").String()
 	hostOverride     = kingpin.Flag("host_override", "Override for HTTP Host header; empty string for no override.").Default("").String()
 	insecure         = kingpin.Flag("insecure", "Ignore server certificate if using https.").Bool()
 	gracefulStop     = make(chan os.Signal)
@@ -353,14 +353,17 @@ func main() {
 	signal.Notify(gracefulStop, syscall.SIGHUP)
 	signal.Notify(gracefulStop, syscall.SIGQUIT)
 
-	exporter := NewExporter(*scrapeURI)
-	prometheus.MustRegister(exporter)
-	prometheus.MustRegister(version.NewCollector("apache_exporter"))
-
 	log.Infoln("Starting apache_exporter", version.Info())
 	log.Infoln("Build context", version.BuildContext())
 	log.Infof("Starting Server: %s", *listeningAddress)
-	log.Infof("Collect from: %s", *scrapeURI)
+
+	if *scrapeURI != "" {
+		exporter := NewExporter(*scrapeURI)
+		prometheus.MustRegister(exporter)
+		prometheus.MustRegister(version.NewCollector("apache_exporter"))
+		http.Handle(*metricsEndpoint, promhttp.Handler())
+		log.Infof("Collect from: %s", *scrapeURI)
+	}
 
 	// listener for the termination signals from the OS
 	go func() {
@@ -372,7 +375,6 @@ func main() {
 		os.Exit(0)
 	}()
 
-	http.Handle(*metricsEndpoint, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`<html>
 			 <head><title>Apache Exporter</title></head>
@@ -382,5 +384,26 @@ func main() {
 			 </body>
 			 </html>`))
 	})
+	http.HandleFunc("/scrape", newScrapeHandle())
 	log.Fatal(http.ListenAndServe(*listeningAddress, nil))
+}
+
+func newScrapeHandle() func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("target")
+		if target == "" {
+			http.Error(w, "'target' parameter must be specified", http.StatusBadRequest)
+			return
+		}
+		exporter := NewExporter(target)
+		registry := prometheus.NewRegistry()
+		registry.MustRegister(exporter)
+		gatherers := prometheus.Gatherers{
+			prometheus.DefaultGatherer,
+			registry,
+		}
+		// Delegate http serving to Prometheus client library, which will call collector.Collect.
+		h := promhttp.HandlerFor(gatherers, promhttp.HandlerOpts{})
+		h.ServeHTTP(w, r)
+	}
 }
