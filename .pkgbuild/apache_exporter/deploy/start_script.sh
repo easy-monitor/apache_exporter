@@ -23,7 +23,7 @@ fi
 
 
 # 启动命令
-start_cmd="./bin/apache_exporter --web.listen-address=:9117 >/dev/null 2>log/${app_folder}.log &"
+start_cmd="./bin/apache_exporter --telemetry.address=:9117 >/dev/null 2>log/${app_folder}.log &"
 
 
 # 日志目录
